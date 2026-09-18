@@ -2701,7 +2701,7 @@ if(zero_crosses < 5){
                     // Publish the raw ceiling for the tenKhz opening-smoothing filter.
                     bemf_cap_raw = (bemf_duty_max < 2000) ? (uint16_t)bemf_duty_max : 2000;
                 } else if (commutation_interval < ((ci_free << 1) / 3)
-                        && duty_cycle > bemf_cap_floor
+                        && input >= 47
                         && cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND) {
                     // ci_free is computed from the RATED Kv, but a real motor at no
                     // load genuinely spins at ~free-spin speed, and actual Kv often
@@ -2717,11 +2717,17 @@ if(zero_crosses < 5){
                     // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
                     // current is naturally low, so no cap is applied and no cutoff is
                     // needed.
-                    // Also gated on duty_cycle > bemf_cap_floor: at or below the
-                    // current floor a fully stalled rotor only draws the safe design
-                    // current, so the cutoff is unnecessary there. Skipping it
-                    // avoids nuisance 1s timeouts when passing slowly through the
-                    // zero-throttle crossover (small positive <-> small negative thrust).
+                    // Gated on input >= 47 (throttle actually applied), matching the fast
+                    // stall cutoff below, rather than on duty_cycle > bemf_cap_floor:
+                    // a stalled rotor within the current target still heats the
+                    // windings, and the floor saturates at full duty for low-Kv motors,
+                    // which disabled this cutoff for them entirely. Below idle the motor
+                    // is coasting or braking to a stop and ci_free is stale
+                    // (stall_ci_threshold is only refreshed with throttle applied), so
+                    // the cutoff stays off there. It is now active at small throttle,
+                    // which the old floor gate excluded to avoid nuisance 1s timeouts
+                    // when passing slowly through the zero-throttle crossover (small
+                    // positive <-> small negative thrust) - bench-verify slow reversals.
                     // And gated on cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND: a freshly
                     // commanded deceleration leaves the motor legitimately faster than
                     // the new (lower) commanded free-spin, which reads as ci < ci_free
