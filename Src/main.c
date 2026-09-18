@@ -553,12 +553,14 @@ uint16_t throttle_max_at_high_rpm = 2000;
 // that battery current is duty*motor current, so it is always the lower of the two.
 #define BEMF_CAP_TARGET_CURRENT   40  // sustained ceiling held by the back-EMF cap
 #define BEMF_CAP_BURST_CURRENT   100  // transient accel ceiling, decays with the ~26ms EMA
-// Bounds on the derived floor. The upper bound is a backstop for a low battery voltage
-// (the duty needed for a given current grows as Vbat falls) so a brown-out can never
-// hand a stalled motor an unbounded duty; the lower bound keeps enough headroom to
-// start and hold a motor if the resistance estimate comes out very small.
+// Lower bound on the derived floor: keeps enough headroom to start and hold a motor if
+// the resistance estimate comes out very small. There is deliberately no upper bound
+// below full duty: when the target current needs more than 100% duty (high-resistance
+// motor or low battery voltage), the motor cannot reach the target even stalled at full
+// duty, so the floor saturates at 2000 and the cap simply never binds. This relies on
+// the resistance estimate being accurate - only motors of the reference form factor are
+// used, so R ~ 1/Kv^2 holds.
 #define BEMF_CAP_FLOOR_MIN       100  // 5% duty
-#define BEMF_CAP_FLOOR_MAX      1000  // 50% duty
 // Below this the battery voltage reading is treated as not yet settled (the ADC EMA
 // starts at 0 on boot), and the duty limits keep their conservative defaults.
 #define BEMF_CAP_MIN_VALID_VBAT  500  // 5.00 V, in centivolts like battery_voltage
@@ -791,8 +793,8 @@ static void updateCurrentLimitDuty(void)
     if (floor_duty < BEMF_CAP_FLOOR_MIN) {
         floor_duty = BEMF_CAP_FLOOR_MIN;
     }
-    if (floor_duty > BEMF_CAP_FLOOR_MAX) {
-        floor_duty = BEMF_CAP_FLOOR_MAX;
+    if (floor_duty > 2000) {
+        floor_duty = 2000; // target unreachable even at full duty: the cap never binds
     }
 
     uint32_t burst_duty = currentToDuty(BEMF_CAP_BURST_CURRENT, vbat);
