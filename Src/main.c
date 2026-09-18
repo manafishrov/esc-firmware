@@ -442,24 +442,25 @@ uint32_t stall_ci_threshold = 45000;
 // --- Acceleration boost / deceleration handling for the back-EMF duty cap ---
 // Commands are slew-limited and the motor speed lags the throttle, so the
 // instantaneous back-EMF cap is too tight during hard acceleration (it holds current
-// at the steady 40A line before the motor has sped up, starving accel torque) and it
-// falsely flags hard *deceleration* as an impossible overspeed (the motor is still
+// at the steady BEMF_CAP_TARGET_CURRENT line before the motor has sped up, starving
+// accel torque) and it falsely flags hard *deceleration* as an impossible overspeed (the motor is still
 // fast while the commanded free-spin has just dropped). We keep an EMA of the
 // commanded duty; the gap between the instantaneous and filtered command tells us
 // whether we are accelerating (gap > 0) or decelerating (gap < 0).
 //   - Accel: raise the cap's current limit by the gap, bounded to a burst ceiling.
 //     The gap (and thus the boost) decays as the EMA catches up, so a motor that does
-//     NOT actually speed up (jammed) drops back to the 40A floor within ~tens of ms -
+//     NOT actually speed up (jammed) drops back to the steady floor within ~tens of ms -
 //     transient overcurrent is allowed, sustained overcurrent is not.
 //   - Decel: the motor being faster than the freshly-lowered commanded free-spin is
 //     expected, not a spurious-ZC fault, so the implausible-CI cutoff is suppressed.
 #define CMD_DUTY_EMA_SHIFT      9   // EMA time constant ~= (1<<9)/20kHz ~= 26 ms
 #define CMD_DUTY_FRAC_BITS      8   // fixed-point fraction bits (no EMA residual error)
-// bemf_cap_floor (200 = 10% duty) bounds steady stall current to ~40A. During accel
-// the floor is raised by up to MAX_ACCEL_BOOST: 200+300 = 500 = 25% duty => worst-case
-// stall current 0.25*20/0.05 = 100A, and only for the ~26ms EMA decay before falling
-// back to 40A. Lower this for a tighter burst ceiling.
-#define MAX_ACCEL_BOOST         300 // burst ceiling: floor 200 + 300 = 500 (25% duty, 100A)
+// bemf_cap_floor is the duty headroom that bounds steady stall current to
+// BEMF_CAP_TARGET_CURRENT (see the motor-resistance block below); it is recomputed
+// from the motor resistance and the measured battery voltage, not fixed. During accel
+// the floor is raised by up to bemf_cap_accel_boost, which lifts the ceiling to
+// BEMF_CAP_BURST_CURRENT, and only for the ~26ms EMA decay before falling back to the
+// steady target. Lower BEMF_CAP_BURST_CURRENT for a tighter burst ceiling.
 #define DECEL_SUPPRESS_DEADBAND 60  // command-gap (~3% duty) past which decel suppression engages
 // RAW commanded duty, captured in setInput BEFORE duty_cycle_setpoint is clamped to
 // duty_cycle_maximum. The boost must key off what the pilot asks for, not the already-
@@ -526,7 +527,48 @@ uint16_t low_rpm_level = 20; // thousand erpm used to set range for throttle res
 uint16_t high_rpm_level = 70; //
 uint16_t throttle_max_at_low_rpm = 300; // 15% duty: stock low-RPM/pre-sync duty floor, needed for reliable startup torque
 uint16_t throttle_max_at_high_rpm = 2000;
-uint16_t bemf_cap_floor = 200; // 10% duty: back-EMF dynamic cap's stall-current floor (~40A at 0.05ohm/20V), since there is no usable current sensor
+
+// --- Motor resistance estimate and the current-derived duty limits ---
+// The duty caps here are voltage headroom, not current: duty D above the motor's
+// back-EMF drives I = D*Vbat/R through the winding, so a fixed duty only means a fixed
+// current for one particular motor and battery voltage. There is no usable current
+// sensor (the AM60's shunt reads the sum of all four ESCs), so the current is derived
+// from the motor's line-to-line resistance and the measured battery voltage.
+//
+// R is estimated from the configured Kv rather than measured. For a given motor frame,
+// the number of winding turns N scales as 1/Kv and each turn's wire cross-section as
+// 1/N (the slot copper area is fixed), so R ~ N^2 ~ 1/Kv^2:
+//     R(Kv) = MOTOR_R_REF_MILLIOHM * (MOTOR_KV_REF / Kv)^2
+// anchored on a measured Manafish thruster motor (930 KV -> 180 mOhm line-to-line).
+// This holds for motors of similar size and construction to the reference; a much
+// larger or smaller frame at the same Kv will deviate, so it is an estimate and does
+// not replace measuring. It deliberately models the winding only - ESC FETs, wiring and
+// connectors add series resistance, which makes the real current LOWER than the target,
+// so that error is on the safe side.
+#define MOTOR_KV_REF             930  // Kv of the motor the reference resistance was measured on
+#define MOTOR_R_REF_MILLIOHM     180  // its measured line-to-line resistance, in milliohms
+#define MOTOR_R_MIN_MILLIOHM      20  // clamps keep an extreme Kv setting from producing nonsense
+#define MOTOR_R_MAX_MILLIOHM    2000
+// Current targets the back-EMF cap enforces, in amperes of MOTOR (phase) current. Note
+// that battery current is duty*motor current, so it is always the lower of the two.
+#define BEMF_CAP_TARGET_CURRENT   40  // sustained ceiling held by the back-EMF cap
+#define BEMF_CAP_BURST_CURRENT   100  // transient accel ceiling, decays with the ~26ms EMA
+// Bounds on the derived floor. The upper bound is a backstop for a low battery voltage
+// (the duty needed for a given current grows as Vbat falls) so a brown-out can never
+// hand a stalled motor an unbounded duty; the lower bound keeps enough headroom to
+// start and hold a motor if the resistance estimate comes out very small.
+#define BEMF_CAP_FLOOR_MIN       100  // 5% duty
+#define BEMF_CAP_FLOOR_MAX      1000  // 50% duty
+// Below this the battery voltage reading is treated as not yet settled (the ADC EMA
+// starts at 0 on boot), and the duty limits keep their conservative defaults.
+#define BEMF_CAP_MIN_VALID_VBAT  500  // 5.00 V, in centivolts like battery_voltage
+
+uint16_t motor_resistance_milliohm = MOTOR_R_REF_MILLIOHM; // estimated from Kv at settings load
+// Conservative defaults until the first valid battery-voltage reading: 10% duty is the
+// pre-existing fixed floor, and it is tighter than the derived value for every
+// resistance/voltage combination this hardware runs.
+uint16_t bemf_cap_floor = 200;        // back-EMF cap's stall-current floor, BEMF_CAP_TARGET_CURRENT
+uint16_t bemf_cap_accel_boost = 300;  // added to the floor while accelerating, up to BEMF_CAP_BURST_CURRENT
 
 uint16_t commutation_intervals[6] = { 0 };
 volatile uint32_t average_interval = 0;
@@ -705,6 +747,66 @@ int32_t doPidCalculations(struct fastPID* pidnow, int actual, int target)
     return pidnow->pid_output;
 }
 
+// Estimate the motor's line-to-line resistance from the configured Kv (see the
+// MOTOR_KV_REF block). Called whenever motor_kv changes, i.e. at settings load.
+static void updateMotorResistance(void)
+{
+    uint32_t kv = motor_kv;
+    if (kv == 0) {
+        kv = MOTOR_KV_REF; // no usable Kv setting: fall back to the reference motor
+    }
+    uint32_t r_milliohm = ((uint32_t)MOTOR_R_REF_MILLIOHM * MOTOR_KV_REF * MOTOR_KV_REF)
+        / (kv * kv);
+    if (r_milliohm < MOTOR_R_MIN_MILLIOHM) {
+        r_milliohm = MOTOR_R_MIN_MILLIOHM;
+    }
+    if (r_milliohm > MOTOR_R_MAX_MILLIOHM) {
+        r_milliohm = MOTOR_R_MAX_MILLIOHM;
+    }
+    motor_resistance_milliohm = (uint16_t)r_milliohm;
+}
+
+// Duty (0..2000) that drives `amps` of motor current through motor_resistance_milliohm
+// at the present battery voltage:
+//     D = 2000 * I * R / Vbat
+// with R in milliohms and battery_voltage in centivolts, which reduces to
+//     D = 200 * I * R_milliohm / battery_voltage_centivolts.
+static uint32_t currentToDuty(uint32_t amps, uint32_t vbat_centivolts)
+{
+    return (200UL * amps * motor_resistance_milliohm) / vbat_centivolts;
+}
+
+// Recompute the back-EMF cap's duty limits from the resistance estimate and the
+// measured battery voltage, so they track a fixed CURRENT as the battery sags.
+// Called at the 1kHz ADC rate, from the same main-loop context that consumes them.
+static void updateCurrentLimitDuty(void)
+{
+    uint32_t vbat = battery_voltage;
+    if (vbat < BEMF_CAP_MIN_VALID_VBAT) {
+        return; // reading not settled yet: keep the conservative defaults
+    }
+    updateMotorResistance(); // keeps the estimate in step with a runtime Kv change
+
+    uint32_t floor_duty = currentToDuty(BEMF_CAP_TARGET_CURRENT, vbat);
+    if (floor_duty < BEMF_CAP_FLOOR_MIN) {
+        floor_duty = BEMF_CAP_FLOOR_MIN;
+    }
+    if (floor_duty > BEMF_CAP_FLOOR_MAX) {
+        floor_duty = BEMF_CAP_FLOOR_MAX;
+    }
+
+    uint32_t burst_duty = currentToDuty(BEMF_CAP_BURST_CURRENT, vbat);
+    if (burst_duty > 2000) {
+        burst_duty = 2000;
+    }
+    if (burst_duty < floor_duty) {
+        burst_duty = floor_duty; // never let the accel boost tighten the steady limit
+    }
+
+    bemf_cap_floor = (uint16_t)floor_duty;
+    bemf_cap_accel_boost = (uint16_t)(burst_duty - floor_duty);
+}
+
 void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
@@ -806,6 +908,7 @@ void loadEEpromSettings()
 #ifdef ONE_TWO_CELL_MAX
 		motor_kv =  motor_kv / 16;
 #endif
+    updateMotorResistance(); // the back-EMF cap's current limits are derived from this
     setVolume(2);
     if (eepromBuffer.eeprom_version > 0) { // these commands weren't introduced until eeprom version 1.
 #ifdef CUSTOM_RAMP
@@ -1506,9 +1609,9 @@ void tenKhzRoutine()
     // 100 crosses from a standstill takes longer than the EMA time constant, so if the
     // EMA tracked freely it would catch up to the (high) command during pre-sync - where
     // the boost is gated off anyway - and the gap would already be ~0 by the time the
-    // boost is allowed post-sync. The motor would then be hard-limited to 40A exactly
-    // when it needs burst torque to climb out of the low-RPM/high-drag region, trapping
-    // it in an oscillating equilibrium. Freezing holds the boost armed so it fires in
+    // boost is allowed post-sync. The motor would then be hard-limited to the steady
+    // current target exactly when it needs burst torque to climb out of the
+    // low-RPM/high-drag region, trapping it in an oscillating equilibrium. Freezing holds the boost armed so it fires in
     // full the instant sync completes. At idle the motor is not running, so the EMA
     // still decays to zero there, ready to arm the next launch.
     if (!(running && zero_crosses < RPM_CONFIRM_ZERO_CROSSES)) {
@@ -2443,7 +2546,10 @@ if(zero_crosses < 5){
 #endif
             if (actual_current < 0) {
                 actual_current = 0;
-            }             
+            }
+            // Re-derive the back-EMF cap's duty limits from the fresh battery voltage so
+            // they hold the configured CURRENT rather than a fixed duty as the pack sags.
+            updateCurrentLimitDuty();
             if (eepromBuffer.low_voltage_cut_off == 1) {  
                 if (battery_voltage < (cell_count * low_cell_volt_cutoff)) {
                   low_voltage_count++;
@@ -2557,9 +2663,10 @@ if(zero_crosses < 5){
             //            = bemf_cap_floor * ci / (ci - ci_free)
             // where ci_free = stall_ci_threshold/STALL_SPEED_FRACTION is the
             // theoretical free-spin CI at current throttle/voltage/Kv.
-            // At stall (ci >> ci_free): D_max = bemf_cap_floor (10%).
+            // At stall (ci >> ci_free): D_max = bemf_cap_floor.
             // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
-            // Between those extremes the cap scales so current is always <= 40A.
+            // Between those extremes the cap scales so current stays at or below
+            // BEMF_CAP_TARGET_CURRENT.
             // Raw back-EMF ceiling published to the tenKhz smoothing filter. Default to
             // "no limit" each pass; the binding branch below sets it to the real ceiling.
             bemf_cap_raw = 2000;
@@ -2572,16 +2679,17 @@ if(zero_crosses < 5){
                     - (commanded_duty_filtered_scaled >> CMD_DUTY_FRAC_BITS);
                 if (commutation_interval > ci_free) {
                     // Transient acceleration boost. The cap normally holds current at
-                    // bemf_cap_floor*Vbus/R (~40A) regardless of speed; raising the
-                    // floor by the (decaying) accel gap raises that current limit, up
-                    // to the MAX_ACCEL_BOOST burst ceiling (~100A). Because the gap
-                    // decays with the ~26ms EMA, a jammed motor (which never speeds up,
-                    // so the command stays above the EMA only until it catches up)
-                    // falls back to the 40A floor within a few tens of ms.
+                    // bemf_cap_floor*Vbus/R (BEMF_CAP_TARGET_CURRENT) regardless of
+                    // speed; raising the floor by the (decaying) accel gap raises that
+                    // current limit, up to the bemf_cap_accel_boost burst ceiling
+                    // (BEMF_CAP_BURST_CURRENT). Because the gap decays with the ~26ms
+                    // EMA, a jammed motor (which never speeds up, so the command stays
+                    // above the EMA only until it catches up) falls back to the steady
+                    // target within a few tens of ms.
                     uint32_t accel_floor = bemf_cap_floor;
                     if (cmd_duty_gap > 0) {
-                        accel_floor += (cmd_duty_gap > MAX_ACCEL_BOOST)
-                            ? MAX_ACCEL_BOOST : (uint32_t)cmd_duty_gap;
+                        accel_floor += (cmd_duty_gap > (int32_t)bemf_cap_accel_boost)
+                            ? bemf_cap_accel_boost : (uint32_t)cmd_duty_gap;
                     }
                     uint32_t bemf_duty_max = accel_floor
                         * commutation_interval / (commutation_interval - ci_free);
@@ -2607,9 +2715,9 @@ if(zero_crosses < 5){
                     // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
                     // current is naturally low, so no cap is applied and no cutoff is
                     // needed.
-                    // Also gated on duty_cycle > bemf_cap_floor: at or below the ~10%
+                    // Also gated on duty_cycle > bemf_cap_floor: at or below the
                     // current floor a fully stalled rotor only draws the safe design
-                    // current (~40A), so the cutoff is unnecessary there. Skipping it
+                    // current, so the cutoff is unnecessary there. Skipping it
                     // avoids nuisance 1s timeouts when passing slowly through the
                     // zero-throttle crossover (small positive <-> small negative thrust).
                     // And gated on cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND: a freshly
@@ -2673,8 +2781,9 @@ if(zero_crosses < 5){
             // timeout below) to stop the high-duty current dump, then hand off to the
             // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
             // so it never interferes with startup, where long intervals are normal.
-            // Also gated on duty_cycle > bemf_cap_floor: below the ~10% current floor a
-            // stalled rotor is current-safe (~40A), so the cutoff is unnecessary there.
+            // Also gated on duty_cycle > bemf_cap_floor: below the current floor a
+            // stalled rotor is current-safe (BEMF_CAP_TARGET_CURRENT), so the cutoff
+            // is unnecessary there.
             //
             // The INTERVAL_TIMER_COUNT > stall_ci_threshold term is what separates a real
             // jam from a hard deceleration. commutation_interval is a heavily-lagging
