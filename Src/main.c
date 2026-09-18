@@ -2783,9 +2783,15 @@ if(zero_crosses < 5){
             // timeout below) to stop the high-duty current dump, then hand off to the
             // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
             // so it never interferes with startup, where long intervals are normal.
-            // Also gated on duty_cycle > bemf_cap_floor: below the current floor a
-            // stalled rotor is current-safe (BEMF_CAP_TARGET_CURRENT), so the cutoff
-            // is unnecessary there.
+            // Deliberately NOT gated on duty_cycle > bemf_cap_floor: even when a stalled
+            // rotor is within the current target (low duty, or a low-Kv motor whose floor
+            // saturates at full duty), holding that current into a jammed motor still
+            // heats the windings, so a jam is cut at any duty. Gated instead on
+            // input >= 47 (throttle actually applied): with the throttle at idle the
+            // motor is coasting or braking to a stop, e.g. while reversing through zero
+            // in 3D mode, and stall_ci_threshold is not refreshed below idle - without
+            // this gate that normal slow-down would read as a jam and lock the motor out
+            // for the 1s stall cooldown on every reversal.
             //
             // The INTERVAL_TIMER_COUNT > stall_ci_threshold term is what separates a real
             // jam from a hard deceleration. commutation_interval is a heavily-lagging
@@ -2799,7 +2805,7 @@ if(zero_crosses < 5){
             // crosses it within a fraction of a ms - fast cutoff preserved.
             if (eepromBuffer.stuck_rotor_protection && running == 1
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
-                    && duty_cycle > bemf_cap_floor
+                    && input >= 47
                     && INTERVAL_TIMER_COUNT > stall_ci_threshold
                     && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
                 allOff();
