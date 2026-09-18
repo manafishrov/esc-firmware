@@ -434,6 +434,17 @@ char bemf_timeout = 10;
 // If one is overdue by this factor, the rotor decelerated abruptly (jammed at
 // speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
 #define STALL_OVERDUE_FACTOR 3
+// Throttle deadband for the fast stall cutoff and the overspeed cutoff: both only act
+// at or above 10% throttle. `input` is the throttle MAGNITUDE on the 47..2047 scale
+// (47 = lowest running throttle, 2047 = full) in both directions - bidirectional
+// setInput maps the forward and reverse halves of the command range onto the same
+// scale - so one threshold covers forward, reverse and the switches between them.
+// Below it the motor is at low power or passing through the zero-throttle crossover,
+// where it can briefly spin faster or slower than the small throttle "expects" and
+// read as a stall; a direction change also goes through input = 0 while the motor
+// slows, so the cutoffs are never armed across a reversal. A rotor jammed below the
+// deadband is still caught by the no-rotation timeout (INTERVAL_TIMER_COUNT > 45000).
+#define STALL_CUTOFF_MIN_INPUT (47 + 200) // 10% of the 2000-count throttle span
 uint32_t stall_cooldown = 0;
 // Dynamic slow-spin threshold in commutation_interval units (0.5µs each).
 // Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
@@ -2701,7 +2712,7 @@ if(zero_crosses < 5){
                     // Publish the raw ceiling for the tenKhz opening-smoothing filter.
                     bemf_cap_raw = (bemf_duty_max < 2000) ? (uint16_t)bemf_duty_max : 2000;
                 } else if (commutation_interval < ((ci_free << 1) / 3)
-                        && input >= 47
+                        && input >= STALL_CUTOFF_MIN_INPUT
                         && cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND) {
                     // ci_free is computed from the RATED Kv, but a real motor at no
                     // load genuinely spins at ~free-spin speed, and actual Kv often
@@ -2717,17 +2728,18 @@ if(zero_crosses < 5){
                     // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
                     // current is naturally low, so no cap is applied and no cutoff is
                     // needed.
-                    // Gated on input >= 47 (throttle actually applied), matching the fast
-                    // stall cutoff below, rather than on duty_cycle > bemf_cap_floor:
+                    // Gated on input >= STALL_CUTOFF_MIN_INPUT (10% throttle, either
+                    // direction), matching the fast stall cutoff below, rather than on
+                    // duty_cycle > bemf_cap_floor:
                     // a stalled rotor within the current target still heats the
                     // windings, and the floor saturates at full duty for low-Kv motors,
                     // which disabled this cutoff for them entirely. Below idle the motor
                     // is coasting or braking to a stop and ci_free is stale
                     // (stall_ci_threshold is only refreshed with throttle applied), so
-                    // the cutoff stays off there. It is now active at small throttle,
-                    // which the old floor gate excluded to avoid nuisance 1s timeouts
-                    // when passing slowly through the zero-throttle crossover (small
-                    // positive <-> small negative thrust) - bench-verify slow reversals.
+                    // the cutoff stays off there, and the 10% deadband above idle keeps
+                    // it off through the zero-throttle crossover (small positive <->
+                    // small negative thrust), where the motor can briefly outrun the
+                    // small throttle and cause nuisance 1s timeouts.
                     // And gated on cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND: a freshly
                     // commanded deceleration leaves the motor legitimately faster than
                     // the new (lower) commanded free-spin, which reads as ci < ci_free
@@ -2793,11 +2805,11 @@ if(zero_crosses < 5){
             // rotor is within the current target (low duty, or a low-Kv motor whose floor
             // saturates at full duty), holding that current into a jammed motor still
             // heats the windings, so a jam is cut at any duty. Gated instead on
-            // input >= 47 (throttle actually applied): with the throttle at idle the
-            // motor is coasting or braking to a stop, e.g. while reversing through zero
-            // in 3D mode, and stall_ci_threshold is not refreshed below idle - without
-            // this gate that normal slow-down would read as a jam and lock the motor out
-            // for the 1s stall cooldown on every reversal.
+            // input >= STALL_CUTOFF_MIN_INPUT (10% throttle, either direction): near
+            // idle the motor is coasting or braking to a stop, e.g. while reversing
+            // through zero in 3D mode, and stall_ci_threshold is not refreshed below
+            // idle - without this gate that normal slow-down would read as a jam and
+            // lock the motor out for the 1s stall cooldown on every reversal.
             //
             // The INTERVAL_TIMER_COUNT > stall_ci_threshold term is what separates a real
             // jam from a hard deceleration. commutation_interval is a heavily-lagging
@@ -2811,7 +2823,7 @@ if(zero_crosses < 5){
             // crosses it within a fraction of a ms - fast cutoff preserved.
             if (eepromBuffer.stuck_rotor_protection && running == 1
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
-                    && input >= 47
+                    && input >= STALL_CUTOFF_MIN_INPUT
                     && INTERVAL_TIMER_COUNT > stall_ci_threshold
                     && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
                 allOff();
