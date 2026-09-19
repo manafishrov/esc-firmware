@@ -9,7 +9,7 @@ upstream AM32 does not intend to merge.
 
 ## Fork model
 
-- `origin` is `git@github.com:manafishrov/AM32.git` and is the product
+- `origin` is `git@github.com:manafishrov/esc-firmware.git` and is the product
   repository.
 - `upstream` is `https://github.com/am32-firmware/AM32.git` and is a source for
   selectively imported fixes.

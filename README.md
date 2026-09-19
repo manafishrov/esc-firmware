@@ -1,4 +1,4 @@
-# Manafish AM32 firmware
+# Manafish ESC firmware
 
 Manafish-maintained fork of [AM32](https://github.com/am32-firmware/AM32) for
 the ROV's brushless-motor ESCs. It is kept as an independent fork because the
@@ -11,7 +11,7 @@ current limiting, temperature lockout, and startup audio.
 
 ## Repository model
 
-- `origin` — [`manafishrov/AM32`](https://github.com/manafishrov/AM32), the
+- `origin` — [`manafishrov/esc-firmware`](https://github.com/manafishrov/esc-firmware), the
   maintained Manafish firmware
 - `upstream` — [`am32-firmware/AM32`](https://github.com/am32-firmware/AM32),
   used to selectively import relevant fixes
