@@ -10,7 +10,7 @@ before every application settings save:
 | Bidirectional mode | Enabled |
 | PWM low/high endpoints | 1000 / 2000 microseconds |
 | PWM neutral | 1500 microseconds |
-| PWM deadband | Existing product value, 3 |
+| PWM deadband | 35 (±35 microseconds around neutral) |
 | Stick-based calibration | Disabled |
 
 This is a targeted normalization, not an EEPROM reset or schema-version bump.
@@ -43,6 +43,14 @@ This does not establish that the installed failing controllers had those
 settings, or rule out input-circuit/detection-timing problems. Hardware testing
 is still required; the Pico's PWM ready acknowledgement is not an ESC arming
 acknowledgement.
+
+The deadband was previously 3 (±3 microseconds). The F421 runs from its
+uncalibrated internal oscillator, which is only accurate to about ±1%
+(roughly ±15 microseconds at 1500 microseconds), so the ESC could measure the
+Pico's 1500 microsecond neutral outside that window and never arm on PWM.
+Controllers that saved the old value are normalized to 35 on their next boot.
+The Pi firmware's PWM thruster test uses a larger step than its DShot test so
+it still clears this window by a similar margin.
 
 ## Pico command cleanup and rollout
 

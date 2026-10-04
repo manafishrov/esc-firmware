@@ -114,6 +114,7 @@ void disturb_policy(void) {
         eepromBuffer.buffer[offsets[i]] = 0x55;
 }
 void seed_old_version(void) { stored.eeprom_version = EEPROM_VERSION - 1; }
+void set_stored_dead_band(int value) { stored.servo.dead_band = value; }
 '''
         cfile = folder / "settings.c"
         cfile.write_text(harness)
@@ -135,7 +136,7 @@ void seed_old_version(void) { stored.eeprom_version = EEPROM_VERSION - 1; }
         self.other.seed()
 
     def assert_policy(self):
-        for i, expected in enumerate((0, 1, 125, 125, 126, 3, 1)):
+        for i, expected in enumerate((0, 1, 125, 125, 126, 35, 1)):
             offset = self.product.policy_offset(i)
             self.assertEqual(self.product.read_byte(offset), expected)
             self.assertEqual(self.product.stored_byte(offset), expected)
@@ -147,6 +148,15 @@ void seed_old_version(void) { stored.eeprom_version = EEPROM_VERSION - 1; }
         self.product.boot()
         self.assert_policy()
         self.assertEqual(self.product.write_count(), 1)
+
+    def test_previous_narrow_pwm_deadband_is_widened_and_saved_once(self):
+        self.product.boot()
+        self.product.set_stored_dead_band(3)
+        self.product.boot()
+        self.assert_policy()
+        self.assertEqual(self.product.write_count(), 2)
+        self.product.boot()
+        self.assertEqual(self.product.write_count(), 2)
 
     def test_unrelated_settings_are_preserved_byte_for_byte(self):
         before = [self.product.read_byte(i) for i in range(192)]

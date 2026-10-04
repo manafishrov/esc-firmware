@@ -725,7 +725,11 @@ static void apply_product_input_settings(void)
     require_input_setting(&eepromBuffer.servo.low_threshold, 125);
     require_input_setting(&eepromBuffer.servo.high_threshold, 125);
     require_input_setting(&eepromBuffer.servo.neutral, 126);
-    require_input_setting(&eepromBuffer.servo.dead_band, 3);
+    // +/-35 us of neutral. The F421 runs from its uncalibrated internal
+    // oscillator (about +/-1%, ~15 us at 1500 us), so a narrower window can
+    // keep a 1500 us neutral pulse from ever reading as zero, and the ESC
+    // then never arms on PWM.
+    require_input_setting(&eepromBuffer.servo.dead_band, 35);
     require_input_setting(&eepromBuffer.disable_stick_calibration, 1);
 #endif
 }
@@ -764,7 +768,7 @@ void loadEEpromSettings()
       eepromBuffer.servo.low_threshold = 125;  // 1000 ms ((1000-750)/2)
       eepromBuffer.servo.high_threshold = 125; // 2000 ms ((2000-1750)/2)
       eepromBuffer.servo.neutral = 126;        // 1500 ms (1500-1374)
-      eepromBuffer.servo.dead_band = 3;
+      eepromBuffer.servo.dead_band = 35;
       eepromBuffer.low_voltage_cut_off = 0;    // Off
       eepromBuffer.low_cell_volt_cutoff = 50;  // 300 threshold (300-250)
       eepromBuffer.rc_car_reverse = 0;
